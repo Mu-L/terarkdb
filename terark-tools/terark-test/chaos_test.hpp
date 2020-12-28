@@ -85,9 +85,10 @@ DEFINE_int32(read_thread, 20, "the number of read thread.");
 DEFINE_int32(cf_num, 1, "the number of column family");
 DEFINE_int32(value_avg_size, 2048, "the average size of value");
 DEFINE_int32(key_avg_size, 64, "the average size of key");
+DEFINE_uint64(blob_size, uint64_t(-1), "the blob size of bigvalue");
 
 const size_t file_size_base = 64ull << 20;
-const size_t blob_size = 2048;
+const size_t blob_size = FLAGS_blob_size;
 const size_t key_mode_nums = 2;
 const size_t value_avg_size = FLAGS_value_avg_size;
 const size_t key_avg_size = FLAGS_key_avg_size;

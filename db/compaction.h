@@ -16,8 +16,11 @@
 #include "rocksdb/listener.h"
 #include "util/arena.h"
 #include "util/autovector.h"
+#include "util/sync_point.h"
 
 namespace rocksdb {
+
+class CompactionState;
 
 // Utility for comparing sstable boundary keys. Returns -1 if either a or b is
 // null which provides the property that a==null indicates a key that is less
@@ -52,6 +55,7 @@ struct CompactionInputFiles {
 
 struct SelectedRange : public RangeStorage {
   double weight;
+  bool is_infinite{false};
 
   SelectedRange(RangeStorage&& _range, double _weight = 0)
       : RangeStorage(std::move(_range)), weight(_weight) {}
@@ -62,6 +66,131 @@ struct SelectedRange : public RangeStorage {
         weight(0) {}
 
   SelectedRange() : weight(0) {}
+  SelectedRange(bool) : is_infinite(true){};
+
+  bool empty() const {
+    return start == limit && !include_start && !include_limit;
+  }
+};
+const SelectedRange infinite_range(true);
+
+// operations need db_mutex_ protecting
+class RangeRegistry {
+ public:
+  struct RangeCmp {
+   public:
+    RangeCmp(const Comparator* uc) : user_comparator_(uc) {}
+    bool operator()(const std::pair<std::string, bool>& l,
+                    const std::pair<std::string, bool>& r) const {
+      auto cmp_res = user_comparator_->Compare(Slice(l.first), Slice(r.first));
+      if (cmp_res < 0) {
+        return true;
+      } else if (cmp_res == 0 && l.second && !r.second) {
+        return true;
+      }
+      return false;
+    }
+
+    const Comparator* user_comparator() { return user_comparator_; }
+
+   private:
+    const Comparator* user_comparator_ = nullptr;
+  };
+
+  RangeRegistry(const Comparator* user_comparator)
+      : rc_(user_comparator), registry_(rc_) {}
+
+  bool RegisterRange(const SelectedRange& r) {
+    TEST_SYNC_POINT("RangeRegistry::RegisterRange");
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(r.is_infinite ||
+           rc_.user_comparator()->Compare(r.start, r.limit) <= 0);
+    if (r.empty()) {
+      // empty range is meanless, make sure all range in registry not empty to
+      // simplify code. since empty range not overlap with any other range,
+      // always return true
+      return true;
+    }
+
+    if (IsRangeOverlaped(r)) {
+      return false;
+    }
+
+    if (r.is_infinite) {
+      assert(registry_.empty());
+      occupied_ = true;
+      return occupied_;
+    } else {
+      registry_[std::make_pair(r.start, r.include_start)] = r;
+      return true;
+    }
+  }
+
+  bool UnregisterRange(const SelectedRange& r) {
+    TEST_SYNC_POINT_CALLBACK("RangeRegistry::UnregisterRange", this);
+    std::lock_guard<std::mutex> lock(mutex_);
+    assert(r.is_infinite ||
+           rc_.user_comparator()->Compare(r.start, r.limit) <= 0);
+    if (r.empty()) {
+      return true;
+    }
+
+    if (r.is_infinite) {
+      // success only no range registered
+      occupied_ = false;
+      return true;
+    } else {
+      auto find = registry_.find(std::make_pair(r.start, r.include_start));
+      if (find == registry_.end()) {
+        return false;
+      }
+      registry_.erase(find);
+    }
+    return true;
+  }
+
+  //  void SetRangeCmp(const Comparator* cmp) { rc_ = {cmp}; }
+  size_t TEST_registry_size() const { return registry_.size(); }
+  bool TEST_occupied() const { return occupied_; }
+
+ private:
+  bool IsRangeOverlaped(const SelectedRange& r) {
+    assert(!r.empty());
+    if (occupied_ || (r.is_infinite && !registry_.empty())) {
+      // all key space is occupied
+      return true;
+    }
+
+    bool upper_ok{false};
+    // find upper range of r.limit ignore whether include
+    auto upper_it = registry_.lower_bound(std::make_pair(r.limit, true));
+    if (upper_it == registry_.end()) {
+      upper_ok = true;
+    } else {
+      auto& upper = upper_it->second;
+      upper_ok =
+          upper.include_start && r.include_limit
+              ? rc_.user_comparator()->Compare(r.limit, upper.start) < 0
+              : rc_.user_comparator()->Compare(r.limit, upper.start) <= 0;
+    }
+
+    if (upper_it == registry_.begin()) {
+      // lower ok
+      return !upper_ok;
+    }
+    auto& lower = (--upper_it)->second;
+    bool lower_ok =
+        lower.include_limit && r.include_start
+            ? rc_.user_comparator()->Compare(lower.limit, r.start) < 0
+            : rc_.user_comparator()->Compare(lower.limit, r.start) <= 0;
+
+    return !upper_ok || !lower_ok;
+  }
+
+  RangeCmp rc_;
+  std::map<std::pair<std::string, bool>, SelectedRange, RangeCmp> registry_;
+  std::mutex mutex_;
+  bool occupied_{false};
 };
 
 class ColumnFamilyData;
@@ -93,7 +222,7 @@ struct CompactionParams {
   bool manual_compaction = false;
   double score = -1;
   bool deletion_compaction = false;
-  bool partial_compaction = false;
+  bool lazy_compaction = false;
   CompactionType compaction_type = kKeyValueCompaction;
   std::vector<SelectedRange> input_range = {};
   CompactionReason compaction_reason = CompactionReason::kUnknown;
@@ -209,6 +338,18 @@ class Compaction {
   // Returns the number of input levels in this compaction.
   size_t num_input_levels() const { return inputs_.size(); }
 
+  std::set<int> all_levels() const {
+    std::set<int> levels{output_level()};
+    for (auto& l : *(inputs())) {
+      levels.insert(l.level);
+    }
+    assert(compaction_type_ == kMapCompaction ||
+           (levels.size() == 1 && *(levels.begin()) == -1));
+    return levels;
+  }
+
+  std::vector<SelectedRange> install_range();
+
   // Return the object that holds the edits to the descriptor done
   // by this compaction.
   VersionEdit* edit() { return &edit_; }
@@ -226,6 +367,10 @@ class Compaction {
 
   // Returns input version of the compaction
   Version* input_version() const { return input_version_; }
+
+  Version* install_version() const { return install_version_; }
+  void RefCurrentVersionAsInstallVersion();
+  void UnRefInstallVersion();
 
   // Returns the ColumnFamilyData associated with the compaction.
   ColumnFamilyData* column_family_data() const { return cfd_; }
@@ -281,7 +426,7 @@ class Compaction {
   bool deletion_compaction() const { return deletion_compaction_; }
 
   // If true, then enable partial compaction
-  bool partial_compaction() const { return partial_compaction_; }
+  bool lazy_compaction() const { return lazy_compaction_; }
 
   // CompactionType
   CompactionType compaction_type() const { return compaction_type_; }
@@ -432,6 +577,14 @@ class Compaction {
   }
   std::vector<TableTransientStat>& transient_stat() { return transient_stat_; }
 
+  void set_fake_install() { is_fake_installed_ = true; }
+  bool is_fake_install() { return is_fake_installed_; }
+  std::shared_ptr<CompactionState>& compaction_state() {
+    return compaction_state_;
+  };
+
+
+
  private:
   // mark (or clear) all files that are being compacted
   void MarkFilesBeingCompacted(bool mark_as_compacted);
@@ -455,6 +608,7 @@ class Compaction {
   uint32_t max_subcompactions_;
   const ImmutableCFOptions immutable_cf_options_;
   const MutableCFOptions mutable_cf_options_;
+  const uint32_t max_subcompactions_;
   Version* input_version_;
   VersionEdit edit_;
   const int number_levels_;
@@ -466,8 +620,8 @@ class Compaction {
   CompressionOptions output_compression_opts_;
   // If true, then the comaction can be done by simply deleting input files.
   const bool deletion_compaction_;
-  // If true, then enable partial compaction
-  const bool partial_compaction_;
+  // If true, then enable lazy compaction
+  const bool lazy_compaction_;
 
   // If true, then output map sst
   const CompactionType compaction_type_;
@@ -503,6 +657,11 @@ class Compaction {
   // compaction
   bool is_trivial_move_;
 
+  bool is_fake_installed_{false};
+  // if not fake installed(real install), need release compaction's range
+  // include buffered compactionstate
+  std::shared_ptr<CompactionState> compaction_state_{nullptr};
+ 
   // Does input compression match the output compression?
   bool InputCompressionMatchesOutput() const;
 
@@ -523,6 +682,8 @@ class Compaction {
 
   // per sub compact
   std::vector<TableTransientStat> transient_stat_;
+
+  Version* install_version_{nullptr};
 };
 
 // Utility function

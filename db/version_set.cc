@@ -342,7 +342,11 @@ class FilePicker {
 };
 }  // anonymous namespace
 
-VersionStorageInfo::~VersionStorageInfo() { delete[](files_ - 1); }
+VersionStorageInfo::~VersionStorageInfo() {
+  size_t size = files_[-1].size();
+  TEST_SYNC_POINT_CALLBACK("~VersionStorageInfo", &size);
+  delete[](files_ - 1);
+}
 
 Version::~Version() {
   assert(refs_ == 0);
@@ -916,6 +920,8 @@ double Version::GetCompactionLoad() const {
 
 double Version::GetGarbageCollectionLoad() const {
   double sum = 0, antiquated = 0;
+  auto& level_files = storage_info_.LevelFiles(-1);
+  for (auto f : level_files) {
   for (auto f : storage_info_.LevelFiles(-1)) {
     if (!f->is_gc_permitted() || f->being_compacted) {
       continue;
@@ -2180,9 +2186,13 @@ void VersionStorageInfo::ComputeBottommostFilesMarkedForCompaction() {
   }
 }
 
-void Version::Ref() { ++refs_; }
+void Version::Ref() {
+  TEST_SYNC_POINT_CALLBACK("Version::Ref", &version_number_);
+  ++refs_;
+}
 
 bool Version::Unref() {
+  TEST_SYNC_POINT_CALLBACK("Version::Unref", &version_number_);
   assert(refs_ >= 1);
   --refs_;
   if (refs_ == 0) {

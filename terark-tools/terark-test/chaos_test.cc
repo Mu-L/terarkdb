@@ -786,15 +786,7 @@ class ChaosTest {
       options.write_buffer_size = size_t(file_size_base * 1.2);
       options.enable_lazy_compaction = true;
       cfDescriptors.emplace_back(rocksdb::kDefaultColumnFamilyName, options);
-      options.compaction_style = rocksdb::kCompactionStyleUniversal;
-      options.write_buffer_size = size_t(file_size_base * 1.1);
-      options.enable_lazy_compaction = true;
-      cfDescriptors.emplace_back("universal" + std::to_string(i), options);
-      options.compaction_style = rocksdb::kCompactionStyleLevel;
-      options.write_buffer_size = size_t(file_size_base / 1.1);
-      options.enable_lazy_compaction = true;
-      cfDescriptors.emplace_back("level" + std::to_string(i), options);
-    }
+   }
     if (flags_ & TestWorker) {
       options.compaction_dispatcher.reset(
           new AsyncCompactionDispatcher(options));
@@ -956,6 +948,70 @@ int main(int argc, char **argv) {
     flags |= TestRangeDel;
     fprintf(stderr, "Test RangeDel\n");
   }
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionPicker::RegisterRangesInLevels1::After", [](void *ptr) {
+        struct CBD {
+          std::vector<rocksdb::SelectedRange> *ir;
+          const std::set<int> *levels;
+        };
+        CBD *callbackdata = (struct CBD *)ptr;
+
+        std::cout << "RegisterRangesInLevels, SelectedRange Size: "
+                  << callbackdata->ir->size() << ", Levels: ";
+        for (auto l : *(callbackdata->levels)) {
+          std::cout << " " << l;
+        }
+        std::cout << " " << std::endl;
+      });
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionPicker::RegisterRangesInLevels2::After", [](void *ptr) {
+        rocksdb::Compaction *callbackdata = (rocksdb::Compaction*)ptr;
+
+        std::cout << "RegisterRangesInLevels, SelectedRange Size: "
+                  << callbackdata->input_range().size() << ", Levels: ";
+        for (auto l : callbackdata->all_levels()) {
+          std::cout << " " << l;
+        }
+        std::cout << " ,Type: "
+                  << (callbackdata->compaction_type() == rocksdb::kMapCompaction
+                          ? "Map"
+                          : "Composite");
+        std::cout << " " << std::endl;
+      });
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionPicker::UnregisterRangesInLevels::After", [](void *ptr) {
+        rocksdb::Compaction *c = (rocksdb::Compaction *)ptr;
+        std::cout << "UnregisterRangesInLevels, SelectedRange Size: "
+                  << c->input_range().size() << ", Levels: ";
+        for (auto l : c->all_levels()) {
+          std::cout << " " << l;
+        }
+        std::cout << " " << std::endl;
+      });
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionJob::InstallCompactionResults::merge_compaction_state",
+      [](void *ptr) {
+        struct CBD {
+          rocksdb::ColumnFamilyData *cfd;
+          rocksdb::Compaction *compaction;
+        };
+        CBD *callbackdata = (struct CBD *)ptr;
+        printf(
+            "Merge CompactionStateBuffer of L-%d, which buffer %zd states. \n",
+            callbackdata->compaction->output_level(),
+            callbackdata->cfd
+                ->compactionstate_buffer(
+                    callbackdata->compaction->output_level())
+                .size());
+      });
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "CompactionJob::InstallCompactionResults::gather_edit", [](void *ptr) {
+        auto compact = (rocksdb::CompactionState *)ptr;
+        printf("Gather %zd State\n", compact->sub_compact_states.size());
+      });
+
+
   int write_thread = FLAGS_write_thread;
   int read_thread = FLAGS_read_thread;
   int cf_num = FLAGS_cf_num;

@@ -57,6 +57,7 @@ class MapBuilder {
   // added_files is sorted
   // file_meta::fd::file_size == 0 if don't need create map files
   // file_meta , porp , deleted_files nullptr if ignore
+  // desc: delete kv in deleted_range of inputs and add new added_files
   Status Build(const std::vector<CompactionInputFiles>& inputs,
                const std::vector<Range>& deleted_range,
                const std::vector<FileMetaData*>& added_files, int output_level,
@@ -67,6 +68,7 @@ class MapBuilder {
 
   // All params are references or pointers
   // push_range use user key
+  // desc: only compact kv in push_range of inputs
   Status Build(const std::vector<CompactionInputFiles>& inputs,
                const std::vector<Range>& push_range, int output_level,
                uint32_t output_path_id, ColumnFamilyData* cfd, Version* version,

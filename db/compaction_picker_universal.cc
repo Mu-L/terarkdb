@@ -496,7 +496,7 @@ Compaction* UniversalCompactionPicker::PickCompaction(
   MeasureTime(ioptions_.statistics, NUM_FILES_IN_SINGLE_COMPACTION,
               c->inputs(0)->size());
 
-  RegisterCompaction(c);
+  c = RegisterCompaction(c);
   vstorage->ComputeCompactionScore(ioptions_, mutable_cf_options);
 
   TEST_SYNC_POINT_CALLBACK("UniversalCompactionPicker::PickCompaction:Return",

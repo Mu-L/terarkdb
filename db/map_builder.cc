@@ -1024,7 +1024,9 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
     }
   }
 
-  // merge ranges
+  // merge multi-level's ranges into one level ranges which been parted
+  // in LevelCompaction, level_ranges.size() may always <= 2
+  // in UniversalCompaction, it depends on min_merge_width
   // TODO(zouzhizhang): multi way union
   while (level_ranges.size() > 1) {
     auto union_a = level_ranges.begin();
@@ -1047,6 +1049,8 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
     level_ranges.erase(union_b);
   }
 
+  // after compactionjob, some range are deleted from inputs(which is
+  // level_ranges now)
   if (!level_ranges.empty() && !deleted_range.empty()) {
     std::vector<RangeWithDepend> ranges;
     ranges.reserve(deleted_range.size());
@@ -1062,6 +1066,8 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
       level_ranges.pop_front();
     }
   }
+
+  // collect tombstones from inputs and new_add_files
   if (!level_ranges.empty() && !range_del_iter_vec.empty()) {
     tombstones.emplace_back(std::shared_ptr<FragmentedRangeTombstoneList>(
         new FragmentedRangeTombstoneList(
@@ -1183,6 +1189,7 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
     if (!s.ok()) {
       return s;
     }
+    assert(level_ranges.size());
     ranges = std::move(level_ranges.front());
     level_ranges.clear();
   }
@@ -1209,7 +1216,9 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
     return s;
   }
 
-  // make sure level 0 files seqno no overlap
+  // To make sure level 0 files seqno not overlap, map-sst in level0 try to
+  // unfold only when there a one range. For other level, sst's seqno can
+  // overlap with other
   if (output_level != 0 || ranges.size() == 1) {
     std::unordered_map<uint64_t, const FileMetaData*> sst_live;
     bool build_map_sst = false;
@@ -1409,6 +1418,7 @@ Status MapBuilder::Build(const std::vector<CompactionInputFiles>& inputs,
     if (level_ranges.level == output_level) {
       continue;
     }
+    // since only compact push_ranges, extract range which overlap with push_ranges
     std::vector<RangeWithDepend> extract = PartitionRangeWithDepend(
         level_ranges.ranges, push_ranges, cfd->internal_comparator(),
         PartitionType::kExtract);

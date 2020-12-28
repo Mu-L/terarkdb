@@ -460,7 +460,9 @@ ColumnFamilyData::ColumnFamilyData(
       queued_for_garbage_collection_(false),
       prev_compaction_needed_bytes_(0),
       allow_2pc_(db_options.allow_2pc),
-      last_memtable_id_(0) {
+      last_memtable_id_(0),
+      compactionstate_buffer_(cf_options.num_levels),
+      level_mutexs_(cf_options.num_levels) {
   Ref();
 
   // Convert user defined table properties collector factories to internal ones.
@@ -707,6 +709,29 @@ int GetL0ThresholdSpeedupCompaction(int level0_file_num_compaction_trigger,
   }
 }
 }  // namespace
+
+bool ColumnFamilyData::TryBufferCompactionState(
+    std::shared_ptr<CompactionState> compactionstate) {
+  // only buffer kKeyValueCompaction
+  assert(compactionstate->compaction->compaction_type() == kKeyValueCompaction);
+  int level = compactionstate->compaction->output_level();
+  auto only_one_compaction = [&]() {
+    if (level == 0) {
+      return 1 == compaction_picker_->level0_compactions_in_progress()->size();
+    } else {
+      return 1 == compaction_picker_->compactions_in_progress()->size();
+    }
+  };
+
+  if (!only_one_compaction() &&
+      compactionstate_buffer_[level].size() <
+          mutable_cf_options_.compactionstate_buffer_size) {
+    compactionstate_buffer_[level].push_back(compactionstate);
+    compactionstate->compaction->set_fake_install();
+    return true;
+  }
+  return false;
+}
 
 std::pair<WriteStallCondition, ColumnFamilyData::WriteStallCause>
 ColumnFamilyData::GetWriteStallConditionAndCause(

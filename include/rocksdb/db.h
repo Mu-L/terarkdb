@@ -1248,6 +1248,7 @@ class DB {
                                               TablePropertiesCollection* props,
                                               bool include_blob = true) = 0;
 
+
   virtual Status SuggestCompactRange(ColumnFamilyHandle* /*column_family*/,
                                      const Slice* /*begin*/,
                                      const Slice* /*end*/) {

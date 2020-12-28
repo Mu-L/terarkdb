@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "db/column_family.h"
+#include "db/compaction.h"
 #include "db/map_builder.h"
 #include "monitoring/statistics.h"
 #include "util/c_style_callback.h"
@@ -249,7 +250,12 @@ CompactionPicker::CompactionPicker(TableCache* table_cache,
     : table_cache_(table_cache),
       env_options_(env_options),
       ioptions_(ioptions),
-      icmp_(icmp) {}
+      icmp_(icmp),
+      range_registries_(ioptions_.num_levels) {
+  for (auto& rr : range_registries_) {
+    rr.reset(new RangeRegistry(ioptions_.user_comparator));
+  }
+}
 
 CompactionPicker::~CompactionPicker() {}
 
@@ -1332,7 +1338,7 @@ Compaction* CompactionPicker::PickRangeCompaction(
   params.compression_opts = GetCompressionOptions(ioptions_, vstorage, level);
   params.manual_compaction = true;
   params.score = 0;
-  params.partial_compaction = true;
+  params.lazy_compaction = true;
   params.max_subcompactions = max_subcompactions;
   params.compaction_type = kKeyValueCompaction;
   params.input_range = std::move(input_range);
@@ -1687,7 +1693,7 @@ Compaction* CompactionPicker::PickCompositeCompaction(
         GetCompressionOptions(ioptions_, vstorage, level, true);
     params.max_subcompactions = max_subcompactions;
     params.score = read_amp;
-    params.partial_compaction = true;
+    params.lazy_compaction = true;
     params.compaction_type = compaction_type;
     params.input_range = std::move(input_range);
     params.compaction_reason = CompactionReason::kCompositeAmplification;
@@ -2045,7 +2051,7 @@ Compaction* CompactionPicker::PickBottommostLevelCompaction(
       GetCompressionOptions(ioptions_, vstorage, level, true);
   params.max_subcompactions = max_subcompactions;
   params.score = 0;
-  params.partial_compaction = true;
+  params.lazy_compaction = true;
   params.compaction_type = kKeyValueCompaction;
   params.input_range = std::move(input_range);
   params.compaction_reason = CompactionReason::kBottommostFiles;
